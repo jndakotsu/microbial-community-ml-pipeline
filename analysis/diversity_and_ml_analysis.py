@@ -47,7 +47,7 @@ from statsmodels.stats.anova import anova_lm
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, RandomForestClassifier
 from sklearn.multioutput import MultiOutputRegressor
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.metrics import (
     r2_score, mean_absolute_error, accuracy_score,
     confusion_matrix, classification_report,
@@ -168,7 +168,7 @@ corr_vars = [
     "MBC_ugg", "MBN_ugg", "MBP_ugg", "MBK_ugg",
     "urease_activity", "amylase_activity", "dehydrogenase_activity",
     "shannon", "simpson", "inverse_simpson", "chao1", "pielou_evenness", "genus_richness",
-    "plant_height_cm", "shoot_dry_matter_g",
+    "plant_height_cm", "shoot_dry_matter_g", "grain_yield_kg_ha",
 ]
 corr = df[corr_vars].corr(method="pearson")
 
@@ -340,6 +340,89 @@ plt.savefig(f"{FIG_DIR}/residual_diagnostics.png", dpi=150)
 plt.close()
 
 # ---------------------------------------------------------------------------
+# 10b. Yield prediction at harvest (week 12)
+#      grain_yield_kg_ha is only recorded once per plot, at the final
+#      (12th) sampling week, so this model is fit on that subset only
+#      (n = 10 treatments x 6 replicates = 60 plots).
+#
+#      Feature set trimmed to 8 variables to reduce overfitting on this
+#      small n: the standard soil-fertility trio N, P, K (available_K_mgkg)
+#      plus organic carbon, and the four variables that ranked highest
+#      for the shoot-dry-matter model above (MBC_ugg, urease/amylase/
+#      dehydrogenase activity).
+# ---------------------------------------------------------------------------
+yield_target_col = "grain_yield_kg_ha"
+yield_feature_cols = [
+    "available_N_mgkg", "available_P_mgkg", "available_K_mgkg", "organic_carbon_pct",
+    "MBC_ugg", "urease_activity", "amylase_activity", "dehydrogenase_activity",
+]
+HARVEST_WEEK = df["week"].max()
+
+df_yield = df.loc[df["week"] == HARVEST_WEEK].dropna(subset=[yield_target_col])
+Xy = df_yield[yield_feature_cols]
+yy = df_yield[yield_target_col]
+yield_treatment = df_yield["treatment"]
+Xy_train, Xy_test, yy_train, yy_test = train_test_split(
+    Xy, yy, test_size=0.25, random_state=42, stratify=yield_treatment
+)
+
+# Stratify CV folds by treatment (not by the continuous yield target) so
+# every fold trains and tests on all 10 treatments rather than risking a
+# fold that never sees a given treatment, which otherwise inflates CV
+# variance for reasons unrelated to the model or feature set.
+yield_cv_splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+yield_cv_folds = list(yield_cv_splitter.split(Xy, yield_treatment))
+
+yield_models = {
+    "Ridge": Ridge(alpha=1.0),
+    "RandomForest": RandomForestRegressor(n_estimators=300, max_depth=4, random_state=42),
+    "GradientBoosting": GradientBoostingRegressor(n_estimators=200, max_depth=2, random_state=42),
+}
+
+print(f"\n=== Model comparison: predicting {yield_target_col} (harvest, week {HARVEST_WEEK}) ===")
+yield_results = []
+yield_fitted = {}
+for name, mdl in yield_models.items():
+    mdl.fit(Xy_train, yy_train)
+    pred = mdl.predict(Xy_test)
+    cv = cross_val_score(mdl, Xy, yy, cv=yield_cv_folds, scoring="r2")
+    yield_results.append({
+        "model": name,
+        "test_r2": r2_score(yy_test, pred),
+        "test_mae": mean_absolute_error(yy_test, pred),
+        "cv_r2_mean": cv.mean(),
+        "cv_r2_std": cv.std(),
+    })
+    yield_fitted[name] = mdl
+
+yield_results_df = pd.DataFrame(yield_results).set_index("model")
+print(yield_results_df.round(3).to_string())
+
+yield_best_name = yield_results_df["test_r2"].idxmax()
+yield_best_model = yield_fitted[yield_best_name]
+yy_pred_best = yield_best_model.predict(Xy_test)
+
+plt.figure(figsize=(7, 5))
+yield_results_df["test_r2"].plot(kind="bar", color=["#4C72B0", "#55A868", "#C44E52"])
+plt.title(f"Model comparison: test R² predicting {yield_target_col}")
+plt.ylabel("Test R²")
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.savefig(f"{FIG_DIR}/yield_model_comparison.png", dpi=150)
+plt.close()
+
+plt.figure(figsize=(5.5, 5.5))
+plt.scatter(yy_test, yy_pred_best, alpha=0.7, color="darkorange", edgecolor="k")
+lims = [min(yy_test.min(), yy_pred_best.min()), max(yy_test.max(), yy_pred_best.max())]
+plt.plot(lims, lims, "k--", linewidth=1)
+plt.xlabel("Actual grain yield (kg/ha)")
+plt.ylabel("Predicted grain yield (kg/ha)")
+plt.title(f"{yield_best_name}: predicted vs. actual yield (n={len(yy)} plots)")
+plt.tight_layout()
+plt.savefig(f"{FIG_DIR}/yield_predicted_vs_actual.png", dpi=150)
+plt.close()
+
+# ---------------------------------------------------------------------------
 # 11. Putative functional guild inference from genus identity
 #     (lightweight stand-in for PICRUSt/Tax4Fun-style functional
 #     prediction: map each genus to its best-known ecological role and
@@ -496,7 +579,7 @@ summary_vars = [
     "soil_pH", "organic_carbon_pct", "available_N_mgkg", "available_P_mgkg",
     "MBC_ugg", "MBN_ugg", "MBP_ugg", "MBK_ugg",
     "urease_activity", "amylase_activity", "dehydrogenase_activity",
-    "shannon", "plant_height_cm", "shoot_dry_matter_g",
+    "shannon", "plant_height_cm", "shoot_dry_matter_g", "grain_yield_kg_ha",
 ]
 
 def mean_se(x):
@@ -511,9 +594,13 @@ with open(RESULTS_PATH, "w") as f:
     f.write("# Results summary (synthetic demo data)\n\n")
     f.write("Mean ± SE by treatment.\n\n")
     f.write(summary_table.to_markdown())
-    f.write("\n\n## Model comparison (predicting plant growth)\n\n")
+    f.write("\n\n## Model comparison (predicting shoot dry matter, all sampling weeks)\n\n")
     f.write(results_df.round(3).to_markdown())
     f.write(f"\n\nBest model on held-out test set: **{best_name}**.\n")
+    f.write(f"\n\n## Model comparison (predicting grain yield, harvest week {HARVEST_WEEK} only)\n\n")
+    f.write(yield_results_df.round(3).to_markdown())
+    f.write(f"\n\nBest model on held-out test set: **{yield_best_name}** "
+            f"(n={len(yy)} plots — one yield value per plot, so this is a small-sample fit).\n")
     f.write("\n\n## Functional guild composition (mean relative abundance)\n\n")
     f.write(mean_guild_abund.round(3).to_markdown())
     f.write("\n\n## Community-fingerprint classification\n\n")

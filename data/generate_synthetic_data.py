@@ -2,9 +2,10 @@
 generate_synthetic_data.py
 
 Creates a SYNTHETIC soil-microbiome dataset shaped like a typical
-screenhouse amendment trial (10 treatments x 3 replicates x 4 sampling
-weeks), including a genus-level abundance table, soil physicochemical
-variables, soil enzyme activities, and a plant growth response.
+screenhouse amendment trial (10 treatments x 3 replicates x 7 sampling
+weeks spanning 0-12 weeks), including a genus-level abundance table,
+soil physicochemical variables, soil enzyme activities, a shoot dry
+matter growth trajectory, and a harvest-time grain yield response.
 
 This is fabricated data for portfolio-demonstration purposes only.
 To turn this into a real project, swap this script for your own
@@ -39,8 +40,9 @@ QUALITY = {
     "F": 0.65, "G": 0.58, "H": 0.85, "I": 0.70, "J": 0.72,
 }
 
-REPLICATES = [1, 2, 3]
-WEEKS = [0, 2, 4, 6]
+REPLICATES = [1, 2, 3, 4, 5, 6]
+WEEKS = [0, 2, 4, 6, 8, 10, 12]
+HARVEST_WEEK = max(WEEKS)
 
 GENERA = [
     "Bacillus", "Pseudomonas", "Azotobacter", "Rhizobium", "Streptomyces",
@@ -75,7 +77,7 @@ for trt, label in TREATMENTS.items():
     q = QUALITY[trt]
     for rep in REPLICATES:
         for wk in WEEKS:
-            week_factor = 1 + 0.15 * wk / 6  # microbial buildup over time
+            week_factor = 1 + 0.15 * wk / HARVEST_WEEK  # microbial buildup over time
             row = {
                 "treatment": trt,
                 "treatment_label": label,
@@ -88,6 +90,7 @@ for trt, label in TREATMENTS.items():
             row["organic_carbon_pct"] = round(rng.normal(1.2 + 1.5 * q * week_factor, 0.12), 2)
             row["available_N_mgkg"] = round(rng.normal(40 + 60 * q * week_factor, 5), 1)
             row["available_P_mgkg"] = round(rng.normal(8 + 12 * q * week_factor, 1.5), 1)
+            row["available_K_mgkg"] = round(rng.normal(45 + 70 * q * week_factor, 6), 1)
 
             # Microbial biomass nutrients
             row["MBC_ugg"] = round(rng.normal(80 + 220 * q * week_factor, 15), 1)
@@ -131,10 +134,17 @@ for trt, label in TREATMENTS.items():
             for genus, c in zip(GENERA, counts):
                 row[f"genus_{genus}"] = int(c)
 
-            # Plant growth response (what we'll try to predict later)
+            # Plant growth response (what we'll try to predict later).
+            # shoot_dry_matter_g is tracked at every sampling week across
+            # the full 12-week trial; grain_yield_kg_ha is a one-off
+            # harvest measurement taken only at the final (12th) week,
+            # the way yield actually gets recorded in the field.
             row["leaf_number_6wap"] = round(rng.normal(8 + 6 * q, 0.8), 1) if wk == 6 else np.nan
             row["plant_height_cm"] = round(rng.normal(25 + 20 * q * week_factor, 3), 1)
             row["shoot_dry_matter_g"] = round(rng.normal(3 + 5 * q * week_factor, 0.6), 2)
+            row["grain_yield_kg_ha"] = (
+                round(rng.normal(1800 + 3200 * q, 250), 1) if wk == HARVEST_WEEK else np.nan
+            )
 
             rows.append(row)
 
